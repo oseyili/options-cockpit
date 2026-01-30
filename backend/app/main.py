@@ -1,10 +1,12 @@
 ﻿from fastapi import FastAPI
+from app.api.pl import router as pl_router
 from app.api.iv import router as iv_router
 from app.api.bs import router as bs_router
 
 app = FastAPI()
 app.include_router(bs_router)
 app.include_router(iv_router)
+app.include_router(pl_router)
 
 @app.get("/")
 def root():
@@ -17,4 +19,5 @@ def health():
 @app.get("/version")
 def version():
     return {"commit": "01a7abe"}
+
 
