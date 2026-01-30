@@ -1,6 +1,6 @@
 ﻿from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from backend.app.options.black_scholes import black_scholes
+from app.options.black_scholes import black_scholes
 
 router = APIRouter(prefix="/api/bs", tags=["black_scholes"])
 
