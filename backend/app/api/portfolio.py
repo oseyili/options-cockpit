@@ -1,14 +1,15 @@
 ﻿from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Literal, Optional
-from app.options.portfolio import Leg as CoreLeg, PLPoint as CorePoint, portfolio_pnl_at_expiry, portfolio_curve, breakevens_from_curve
+from app.options.portfolio import Leg as CoreLeg, portfolio_pnl_at_expiry, portfolio_curve, breakevens_from_curve
 
 router = APIRouter(prefix="/api/pl", tags=["payoff"])
 
-OptionType = Literal["call", "put"]
-Side = Literal["long", "short"]
+Instrument = Literal["option","stock"]
+OptionType = Literal["call","put"]
+Side = Literal["long","short"]
 
-class Leg(BaseModel):
+class OptionLeg(BaseModel):
     instrument: Literal["option"] = "option"
     option_type: OptionType
     side: Side
@@ -16,6 +17,14 @@ class Leg(BaseModel):
     premium: float = Field(..., ge=0)
     qty: int = Field(1, ge=1)
     contract_size: int = Field(100, ge=1)
+
+class StockLeg(BaseModel):
+    instrument: Literal["stock"] = "stock"
+    side: Side
+    shares: int = Field(..., ge=1, description="Number of shares")
+    entry_price: float = Field(..., gt=0, description="Share entry price (cost basis)")
+
+Leg = OptionLeg | StockLeg
 
 class CurveSpec(BaseModel):
     s_min: float = Field(..., gt=0)
@@ -36,13 +45,14 @@ class PortfolioResponse(BaseModel):
     breakevens: List[float]
     curve: Optional[List[CurvePoint]] = None
 
-def _to_core_legs(legs: List[Leg]) -> List[CoreLeg]:
-    return [CoreLeg(**leg.model_dump()) for leg in legs]
+def _to_core(leg: Leg) -> CoreLeg:
+    d = leg.model_dump()
+    return CoreLeg(**d)
 
 @router.post("/portfolio", response_model=PortfolioResponse)
 def portfolio(req: PortfolioRequest):
     try:
-        core_legs = _to_core_legs(req.legs)
+        core_legs = [_to_core(l) for l in req.legs]
         pnl = portfolio_pnl_at_expiry(core_legs, req.underlying)
 
         curve = None

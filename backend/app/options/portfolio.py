@@ -1,16 +1,25 @@
 ﻿from dataclasses import dataclass
-from typing import List, Literal, Optional, Tuple
+from typing import List, Literal
 
+Instrument = Literal["option", "stock"]
 OptionType = Literal["call", "put"]
 Side = Literal["long", "short"]
 
 @dataclass(frozen=True)
 class Leg:
-    instrument: Literal["option"]
-    option_type: OptionType
-    side: Side
-    strike: float
-    premium: float
+    instrument: Instrument
+
+    # option fields
+    option_type: OptionType | None = None
+    strike: float | None = None
+    premium: float | None = None
+
+    # stock fields
+    shares: int | None = None
+    entry_price: float | None = None
+
+    # common
+    side: Side = "long"
     qty: int = 1
     contract_size: int = 100
 
@@ -27,17 +36,20 @@ def _payoff_at_expiry(option_type: str, S: float, K: float) -> float:
         return max(K - S, 0.0)
     raise ValueError("option_type must be 'call' or 'put'")
 
-def leg_pnl_at_expiry(leg: Leg, S: float) -> float:
-    if leg.strike <= 0:
-        raise ValueError("strike must be > 0")
-    if leg.premium < 0:
-        raise ValueError("premium must be >= 0")
+def _option_leg_pnl(leg: Leg, S: float) -> float:
+    if leg.option_type is None:
+        raise ValueError("option_type is required for option legs")
+    if leg.strike is None or leg.strike <= 0:
+        raise ValueError("strike must be > 0 for option legs")
+    if leg.premium is None or leg.premium < 0:
+        raise ValueError("premium must be >= 0 for option legs")
     if leg.qty <= 0:
         raise ValueError("qty must be > 0")
     if leg.contract_size <= 0:
         raise ValueError("contract_size must be > 0")
 
     payoff = _payoff_at_expiry(leg.option_type, S, leg.strike)
+
     if leg.side == "long":
         pnl_per_share = payoff - leg.premium
     elif leg.side == "short":
@@ -47,23 +59,40 @@ def leg_pnl_at_expiry(leg: Leg, S: float) -> float:
 
     return pnl_per_share * leg.qty * leg.contract_size
 
+def _stock_leg_pnl(leg: Leg, S: float) -> float:
+    if leg.shares is None or leg.shares <= 0:
+        raise ValueError("shares must be > 0 for stock legs")
+    if leg.entry_price is None or leg.entry_price <= 0:
+        raise ValueError("entry_price must be > 0 for stock legs")
+
+    pnl_per_share = (S - leg.entry_price)
+    if leg.side == "long":
+        return pnl_per_share * leg.shares
+    elif leg.side == "short":
+        return (-pnl_per_share) * leg.shares
+    else:
+        raise ValueError("side must be 'long' or 'short'")
+
+def leg_pnl_at_expiry(leg: Leg, S: float) -> float:
+    if leg.instrument == "option":
+        return _option_leg_pnl(leg, S)
+    if leg.instrument == "stock":
+        return _stock_leg_pnl(leg, S)
+    raise ValueError("instrument must be 'option' or 'stock'")
+
 def portfolio_pnl_at_expiry(legs: List[Leg], S: float) -> float:
     if not legs:
         raise ValueError("legs must be a non-empty list")
     return sum(leg_pnl_at_expiry(leg, S) for leg in legs)
 
-def portfolio_curve(
-    legs: List[Leg],
-    s_min: float,
-    s_max: float,
-    steps: int = 201
-) -> List[PLPoint]:
+def portfolio_curve(legs: List[Leg], s_min: float, s_max: float, steps: int = 201) -> List[PLPoint]:
     if steps < 2:
         raise ValueError("steps must be >= 2")
     if s_min <= 0 or s_max <= 0:
         raise ValueError("s_min and s_max must be > 0")
     if s_max <= s_min:
         raise ValueError("s_max must be > s_min")
+
     out: List[PLPoint] = []
     step = (s_max - s_min) / (steps - 1)
     for i in range(steps):
@@ -72,7 +101,6 @@ def portfolio_curve(
     return out
 
 def breakevens_from_curve(curve: List[PLPoint]) -> List[float]:
-    # Finds x where pnl crosses 0 by linear interpolation between adjacent points.
     if len(curve) < 2:
         return []
     bes: List[float] = []
@@ -81,12 +109,10 @@ def breakevens_from_curve(curve: List[PLPoint]) -> List[float]:
         if ya == 0.0:
             bes.append(a.underlying)
             continue
-        if ya * yb < 0:  # sign change
-            # linear interpolation: x = x0 + (0 - y0)*(x1-x0)/(y1-y0)
+        if ya * yb < 0:
             x0, x1 = a.underlying, b.underlying
             x = x0 + (-ya) * (x1 - x0) / (yb - ya)
             bes.append(x)
-    # de-dup near equals
     bes_sorted = sorted(bes)
     out: List[float] = []
     for x in bes_sorted:
