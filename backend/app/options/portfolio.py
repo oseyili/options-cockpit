@@ -1,5 +1,5 @@
 ﻿from dataclasses import dataclass
-from typing import List, Literal
+from typing import List, Literal, Optional, Tuple
 
 Instrument = Literal["option", "stock"]
 OptionType = Literal["call", "put"]
@@ -85,6 +85,44 @@ def portfolio_pnl_at_expiry(legs: List[Leg], S: float) -> float:
         raise ValueError("legs must be a non-empty list")
     return sum(leg_pnl_at_expiry(leg, S) for leg in legs)
 
+def net_cashflow_at_entry(legs: List[Leg]) -> float:
+    """
+    Signed cashflow at entry:
+      + means cash received (credit)
+      - means cash paid (debit)
+
+    Options:
+      long option -> pay premium (negative)
+      short option -> receive premium (positive)
+
+    Stock:
+      long stock -> pay entry_price * shares (negative)
+      short stock -> receive proceeds (positive)
+    """
+    if not legs:
+        raise ValueError("legs must be a non-empty list")
+
+    total = 0.0
+    for leg in legs:
+        if leg.instrument == "option":
+            if leg.premium is None:
+                raise ValueError("premium is required for option legs")
+            if leg.qty <= 0 or leg.contract_size <= 0:
+                raise ValueError("qty and contract_size must be > 0")
+            cash = leg.premium * leg.qty * leg.contract_size
+            total += cash if leg.side == "short" else -cash
+
+        elif leg.instrument == "stock":
+            if leg.shares is None or leg.entry_price is None:
+                raise ValueError("shares and entry_price are required for stock legs")
+            cash = leg.entry_price * leg.shares
+            total += cash if leg.side == "short" else -cash
+
+        else:
+            raise ValueError("instrument must be 'option' or 'stock'")
+
+    return total
+
 def portfolio_curve(legs: List[Leg], s_min: float, s_max: float, steps: int = 201) -> List[PLPoint]:
     if steps < 2:
         raise ValueError("steps must be >= 2")
@@ -119,3 +157,9 @@ def breakevens_from_curve(curve: List[PLPoint]) -> List[float]:
         if not out or abs(x - out[-1]) > 1e-6:
             out.append(x)
     return out
+
+def extrema_from_curve(curve: List[PLPoint]) -> Tuple[float, float]:
+    if not curve:
+        raise ValueError("curve must be non-empty")
+    pnls = [p.pnl for p in curve]
+    return (max(pnls), min(pnls))
