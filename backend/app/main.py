@@ -1,5 +1,5 @@
 ﻿from fastapi import FastAPI
-from backend.app.api.bs import router as bs_router
+from app.api.bs import router as bs_router
 
 app = FastAPI()
 app.include_router(bs_router)
@@ -14,5 +14,4 @@ def health():
 
 @app.get("/version")
 def version():
-    return {"commit": "26deca12"}
-
+    return {"commit": "01a7abe"}
