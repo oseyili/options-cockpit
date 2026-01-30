@@ -34,8 +34,9 @@ class StockLeg(BaseModel):
 Leg = OptionLeg | StockLeg
 
 class CurveSpec(BaseModel):
-    s_min: float = Field(..., gt=0)
-    s_max: float = Field(..., gt=0)
+    # Any of these can be omitted; we'll auto-fill.
+    s_min: Optional[float] = Field(None, gt=0)
+    s_max: Optional[float] = Field(None, gt=0)
     steps: int = Field(201, ge=2, le=2001)
 
 class PortfolioRequest(BaseModel):
@@ -54,9 +55,37 @@ class PortfolioResponse(BaseModel):
     max_profit: Optional[float] = None
     max_loss: Optional[float] = None
     curve: Optional[List[CurvePoint]] = None
+    curve_bounds: Optional[CurveSpec] = None  # echo the bounds used (including auto-filled)
 
 def _to_core(leg: Leg) -> CoreLeg:
     return CoreLeg(**leg.model_dump())
+
+def _auto_bounds(core_legs: List[CoreLeg], underlying: float) -> tuple[float, float]:
+    # Use strikes + entry_price + underlying to infer a sensible window
+    refs: List[float] = [underlying]
+
+    for leg in core_legs:
+        if leg.instrument == "option" and leg.strike is not None:
+            refs.append(float(leg.strike))
+        if leg.instrument == "stock" and leg.entry_price is not None:
+            refs.append(float(leg.entry_price))
+
+    lo = min(refs)
+    hi = max(refs)
+
+    center = underlying
+    span = hi - lo
+    # If everything is the same strike/price, give a reasonable default range
+    base = span if span > 0 else max(center * 0.25, 10.0)
+
+    # Wider window: +/- 3x base, and never less than +/- 20% of spot
+    radius = max(3.0 * base, 0.2 * center)
+
+    s_min = max(0.01, center - radius)
+    s_max = center + radius
+    if s_max <= s_min:
+        s_max = s_min + 1.0
+    return s_min, s_max
 
 @router.post("/portfolio", response_model=PortfolioResponse)
 def portfolio(req: PortfolioRequest):
@@ -70,12 +99,26 @@ def portfolio(req: PortfolioRequest):
         breakevens: List[float] = []
         max_profit: Optional[float] = None
         max_loss: Optional[float] = None
+        bounds_used: Optional[CurveSpec] = None
 
         if req.curve is not None:
-            pts = portfolio_curve(core_legs, req.curve.s_min, req.curve.s_max, req.curve.steps)
+            s_min, s_max = req.curve.s_min, req.curve.s_max
+            if s_min is None or s_max is None:
+                auto_min, auto_max = _auto_bounds(core_legs, req.underlying)
+                if s_min is None:
+                    s_min = auto_min
+                if s_max is None:
+                    s_max = auto_max
+
+            # Final sanity
+            if s_max <= s_min:
+                raise ValueError("curve.s_max must be > curve.s_min")
+
+            pts = portfolio_curve(core_legs, s_min, s_max, req.curve.steps)
             curve = [CurvePoint(underlying=p.underlying, pnl=p.pnl) for p in pts]
             breakevens = breakevens_from_curve(pts)
             max_profit, max_loss = extrema_from_curve(pts)
+            bounds_used = CurveSpec(s_min=s_min, s_max=s_max, steps=req.curve.steps)
 
         return PortfolioResponse(
             pnl=pnl,
@@ -84,6 +127,7 @@ def portfolio(req: PortfolioRequest):
             max_profit=max_profit,
             max_loss=max_loss,
             curve=curve,
+            curve_bounds=bounds_used,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
