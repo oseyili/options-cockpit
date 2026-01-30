@@ -1,10 +1,10 @@
 ﻿services:
   - type: web
-    name: options-cockpit-backend
+    name: options-cockpit
     runtime: python
     rootDir: backend
-    plan: starter
+    plan: free
     autoDeploy: true
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn -k uvicorn.workers.UvicornWorker -w 2 -b 0.0.0.0:$PORT app.main:app
+    startCommand: python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
