@@ -25,6 +25,19 @@ class SavedItemSummary(BaseModel):
 class SavedItemDetail(SavedItemSummary):
     payload: Dict[str, Any]
 
+class ExportBundle(BaseModel):
+    exported_at: str
+    items: List[SavedItemDetail]
+
+class ImportRequest(BaseModel):
+    # Accept either the full ExportBundle or just a list of items
+    exported_at: Optional[str] = None
+    items: List[SavedItemDetail] = Field(default_factory=list)
+
+class ImportResponse(BaseModel):
+    imported: int
+    new_ids: List[int]
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -34,7 +47,6 @@ def _startup():
 
 @router.post("", response_model=SavedItemSummary)
 def create(req: SavedCreateRequest):
-    # Basic safety: reject absurd payloads (helps avoid accidental huge uploads)
     raw = json.dumps(req.payload)
     if len(raw) > 200_000:  # 200KB
         raise HTTPException(status_code=413, detail="payload too large (max 200KB)")
@@ -101,3 +113,58 @@ def delete_item(item_id: int):
         raise HTTPException(status_code=404, detail="not found")
 
     return {"deleted": True, "id": item_id}
+
+# -------------------------
+# NEW: export/import/clear
+# -------------------------
+
+@router.get("/export", response_model=ExportBundle)
+def export_all():
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, name, kind, payload_json, created_at FROM saved_items ORDER BY id ASC"
+        ).fetchall()
+
+    items: List[SavedItemDetail] = []
+    for r in rows:
+        items.append(
+            SavedItemDetail(
+                id=int(r["id"]),
+                name=r["name"],
+                kind=r["kind"],
+                created_at=r["created_at"],
+                payload=json.loads(r["payload_json"]),
+            )
+        )
+
+    return ExportBundle(exported_at=_utc_now_iso(), items=items)
+
+@router.post("/import", response_model=ImportResponse)
+def import_all(req: ImportRequest):
+    # Insert as NEW rows (don’t try to preserve ids).
+    # Keep created_at from file if present; otherwise, stamp now.
+    new_ids: List[int] = []
+
+    with get_conn() as conn:
+        for item in req.items:
+            raw = json.dumps(item.payload)
+            if len(raw) > 200_000:
+                raise HTTPException(status_code=413, detail=f"payload too large for item '{item.name}' (max 200KB)")
+            created_at = item.created_at or _utc_now_iso()
+
+            cur = conn.execute(
+                "INSERT INTO saved_items (name, kind, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (item.name, item.kind, raw, created_at),
+            )
+            new_ids.append(int(cur.lastrowid))
+
+        conn.commit()
+
+    return ImportResponse(imported=len(new_ids), new_ids=new_ids)
+
+@router.delete("/clear")
+def clear_all():
+    with get_conn() as conn:
+        conn.execute("DELETE FROM saved_items")
+        conn.commit()
+    return {"cleared": True}
