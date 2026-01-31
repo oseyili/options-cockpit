@@ -4,12 +4,10 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+import urllib.request
 
 from app.storage.db import init_db, get_conn
-
-# Reuse existing builders/pricers directly (no HTTP hop)
-from app.api.strategies import BuildRequest as StrategiesBuildRequest, build as strategies_build
-from app.api.portfolio import PortfolioRequest as PortfolioCalcRequest, portfolio as portfolio_calc
+from app.api.strategies import _build as build_legs_from_template  # internal builder (pure)
 
 router = APIRouter(prefix="/api/templates", tags=["templates"])
 
@@ -21,8 +19,8 @@ def _startup():
     init_db()
 
 class TemplateSaveRequest(BaseModel):
-    name: str = Field(..., min_length=1, max_length=200, description="Friendly label, e.g. 'My weekly iron condor'")
-    template_name: str = Field(..., min_length=1, max_length=80, description="Strategy template key, e.g. 'iron_condor'")
+    name: str = Field(..., min_length=1, max_length=200)
+    template_name: str = Field(..., min_length=1, max_length=80)
     params: Dict[str, Any] = Field(default_factory=dict)
 
 class TemplateSummary(BaseModel):
@@ -39,28 +37,20 @@ class TemplateBuildResponse(BaseModel):
     name: str
     template_name: str
     params: Dict[str, Any]
-    legs: Any  # list[Leg] from strategies_build response
+    legs: Any
 
 class TemplatePriceRequest(BaseModel):
     underlying: float = Field(..., gt=0)
-    # Pass-through curve spec. Your /api/pl/portfolio supports auto-bounds when s_min/s_max omitted.
-    curve: Optional[Dict[str, Any]] = None
+    curve: Optional[Dict[str, Any]] = None  # {steps, s_min?, s_max?}
 
+# Keep it flexible so we don't crash on response shape changes
 class TemplatePriceResponse(BaseModel):
     id: int
     name: str
     template_name: str
     params: Dict[str, Any]
     legs: Any
-
-    # pricing fields (mirrors /api/pl/portfolio)
-    pnl: float
-    net_cashflow: float
-    breakevens: List[float]
-    max_profit: Optional[float] = None
-    max_loss: Optional[float] = None
-    curve: Optional[Any] = None
-    curve_bounds: Optional[Any] = None
+    pricing: Dict[str, Any]
 
 def _load_template(template_id: int) -> TemplateDetail:
     with get_conn() as conn:
@@ -80,6 +70,27 @@ def _load_template(template_id: int) -> TemplateDetail:
         params=dict(payload.get("params", {})),
         created_at=row["created_at"],
     )
+
+def _post_json(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = resp.read().decode("utf-8")
+            return json.loads(data) if data else {}
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8")
+        except Exception:
+            detail = str(e)
+        raise HTTPException(status_code=502, detail=f"Upstream error calling {url}: {detail}")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Upstream connection error calling {url}: {e}")
 
 @router.post("", response_model=TemplateSummary)
 def save_template(req: TemplateSaveRequest):
@@ -131,38 +142,41 @@ def get_template(template_id: int):
 @router.post("/{template_id}/build", response_model=TemplateBuildResponse)
 def build_from_template(template_id: int):
     detail = _load_template(template_id)
-    built = strategies_build(StrategiesBuildRequest(name=detail.template_name, params=detail.params))
+    legs_models = build_legs_from_template(detail.template_name, detail.params)
+    legs = [l.model_dump() for l in legs_models]
     return TemplateBuildResponse(
         id=detail.id,
         name=detail.name,
         template_name=detail.template_name,
         params=detail.params,
-        legs=built.legs,
+        legs=legs,
     )
 
 @router.post("/{template_id}/price", response_model=TemplatePriceResponse)
 def price_template(template_id: int, req: TemplatePriceRequest):
     detail = _load_template(template_id)
 
-    # 1) Build legs
-    built = strategies_build(StrategiesBuildRequest(name=detail.template_name, params=detail.params))
+    # 1) Build legs locally
+    legs_models = build_legs_from_template(detail.template_name, detail.params)
+    legs = [l.model_dump() for l in legs_models]
 
-    # 2) Price via existing portfolio calculator (same logic as /api/pl/portfolio)
-    pr = PortfolioCalcRequest(underlying=req.underlying, legs=built.legs, curve=req.curve)
-    priced = portfolio_calc(pr)
+    # 2) Call the existing, proven pricer endpoint
+    import os
+    base_url = os.getenv("BASE_URL", "https://options-cockpit.onrender.com").rstrip("/")
+    pricing_url = f"{base_url}/api/pl/portfolio"
 
-    # priced is a pydantic model (PortfolioResponse) returned by portfolio_calc
+    payload = {
+        "underlying": req.underlying,
+        "legs": legs,
+        "curve": req.curve,  # can be None; pricer should handle it
+    }
+    pricing = _post_json(pricing_url, payload)
+
     return TemplatePriceResponse(
         id=detail.id,
         name=detail.name,
         template_name=detail.template_name,
         params=detail.params,
-        legs=built.legs,
-        pnl=priced.pnl,
-        net_cashflow=priced.net_cashflow,
-        breakevens=priced.breakevens,
-        max_profit=priced.max_profit,
-        max_loss=priced.max_loss,
-        curve=priced.curve,
-        curve_bounds=getattr(priced, "curve_bounds", None),
+        legs=legs,
+        pricing=pricing,
     )
