@@ -1,4 +1,5 @@
 ﻿from fastapi import FastAPI
+from app.api.templates import router as templates_router
 from app.api.saved import router as saved_router
 from app.api.strategies import router as strategies_router
 from app.api.portfolio import router as portfolio_router
@@ -13,6 +14,7 @@ app.include_router(pl_router)
 app.include_router(portfolio_router)
 app.include_router(strategies_router)
 app.include_router(saved_router)
+app.include_router(templates_router)
 
 @app.get("/")
 def root():
@@ -25,6 +27,7 @@ def health():
 @app.get("/version")
 def version():
     return {"commit": "01a7abe"}
+
 
 
 
